@@ -1,0 +1,77 @@
+<mujoco model="quadrotor_payload">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.01" gravity="0 0 -9.81" integrator="implicitfast" jacobian="sparse">
+    <flag energy="enable" contact="enable"/>
+  </option>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <site name="world_X" type="box" pos="0.5 0.0 0.0" size="0.5 0.01 0.01"
+      quat="1.0 0.0 0.0 0.0" rgba="1 0 0 1"/>
+    <site name="world_Y" type="box" pos="0.0 0.5 0.0" size="0.5 0.01 0.01"
+      quat="0.707 0.0 0.0 0.707" rgba="0 1 0 1"/>
+    <site name="world_Z" type="box" pos="0.0 0.0 0.5" size="0.5 0.01 0.01"
+      quat="-0.707 0.0 0.707 0.0" rgba="0 0 1 1"/>
+
+    <body name="drone_0" pos="0 0 2" euler="0 0 0">
+      <joint name="drone_0" type="free" damping="0.001"/>
+
+      <geom name="core" type="box" pos="0 0 0" size="0.035 0.035 0.015"
+        rgba="1 1 0 1" mass="0.84"/>
+      <geom name="a00" type="box" pos="0.071 0.071 0.0" size="0.05 0.01 0.0025"
+        quat="0.924 0.0 0.0 0.383" rgba="1.0 0.5 0.0 1.0" mass="0.025"/>
+      <geom name="a10" type="box" pos="0.071 -0.071 0.0" size="0.05 0.01 0.0025"
+        quat="0.383 0.0 0.0 0.924" rgba="1.0 0.5 0.0 1.0" mass="0.025"/>
+      <geom name="a20" type="box" pos="-0.071 -0.071 0.0" size="0.05 0.01 0.0025"
+        quat="-0.383 0.0 0.0 0.924" rgba="1.0 0.5 0.0 1.0" mass="0.025"/>
+      <geom name="a30" type="box" pos="-0.071 0.071 0.0" size="0.05 0.01 0.0025"
+        quat="0.924 0.0 0.0 -0.383" rgba="1.0 0.5 0.0 1.0" mass="0.025"/>
+
+      <geom name="thruster00" type="cylinder" pos="0.1 0.1 0.01" size="0.03 0.0025"
+        rgba="0.0 0.0 0.0 1.0" mass="0.015"/>
+      <geom name="thruster10" type="cylinder" pos="0.1 -0.1 0.01" size="0.03 0.0025"
+        rgba="0.0 0.0 0.0 1.0" mass="0.015"/>
+      <geom name="thruster20" type="cylinder" pos="-0.1 -0.1 0.01" size="0.03 0.0025"
+        rgba="0.0 0.0 0.0 1.0" mass="0.015"/>
+      <geom name="thruster30" type="cylinder" pos="-0.1 0.1 0.01" size="0.03 0.0025"
+        rgba="0.0 0.0 0.0 1.0" mass="0.015"/>
+
+      <site name="qcX" type="box" pos="0.05 0.0 0.0" size="0.05 0.005 0.005"
+        quat="1.0 0.0 0.0 0.0" rgba="1 0 0 1"/>
+      <site name="qcY" type="box" pos="0.0 0.05 0.0" size="0.05 0.005 0.005"
+        quat="0.707 0.0 0.0 0.707" rgba="0 1 0 1"/>
+      <site name="qcZ" type="box" pos="0.0 0.0 0.05" size="0.05 0.005 0.005"
+        quat="-0.707 0.0 0.707 0.0" rgba="0 0 1 1"/>
+
+      <site name="thrust" type="sphere" pos="0 0 0" size="0.01" rgba="0 1 1 1"/>
+      <site name="rateX" type="sphere" pos="0 0 0" size="0.01" rgba="0 1 1 1"/>
+      <site name="rateY" type="sphere" pos="0 0 0" size="0.01" rgba="0 1 1 1"/>
+      <site name="rateZ" type="sphere" pos="0 0 0" size="0.01" rgba="0 1 1 1"/>
+      <site name="imu" pos="0 0 0"/>
+      <site name="payload_point_drone_0" pos="0 0 0"/>
+    </body>
+
+    <body name="payload" pos="0 0 0">
+      <joint name="payload_x" type="slide" axis="1 0 0" damping="0.001"/>
+      <joint name="payload_y" type="slide" axis="0 1 0" damping="0.001"/>
+      <joint name="payload_z" type="slide" axis="0 0 1" damping="0.001"/>
+      <geom name="payload_geom" type="sphere" size="0.05" rgba="0 0 1 0.8" mass="0.5"
+        friction="1.0 0.005 0.0001"/>
+      <site name="payload_point" pos="0 0 0.05"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="body_thrust" site="thrust" gear="0 0 1 0 0 0" ctrlrange="0 60"/>
+    <motor name="x_moment" site="rateX" gear="0 0 0 1 0 0" ctrlrange="-0.3 0.3"/>
+    <motor name="y_moment" site="rateY" gear="0 0 0 0 1 0" ctrlrange="-0.3 0.3"/>
+    <motor name="z_moment" site="rateZ" gear="0 0 0 0 0 1" ctrlrange="-0.3 0.3"/>
+  </actuator>
+
+  <tendon>
+    <spatial name="rope0" limited="true" range="0 1" width=".0005">
+      <site site="payload_point_drone_0"/>
+      <site site="payload_point"/>
+    </spatial>
+  </tendon>
+</mujoco>

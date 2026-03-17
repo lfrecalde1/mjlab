@@ -1,0 +1,119 @@
+<mujoco model="sphere_translate">
+  <option timestep="0.01" gravity="0 0 -9.81"/>
+
+  <asset>
+    <texture
+      name="grid_tex"
+      type="2d"
+      builtin="checker"
+      width="512"
+      height="512"
+      rgb1="0.2 0.2 0.2"
+      rgb2="0.35 0.35 0.35"/>
+    <material
+      name="grid_mat"
+      texture="grid_tex"
+      texuniform="true"
+      texrepeat="8 8"
+      reflectance="0.05"/>
+  </asset>
+
+  <worldbody>
+    <light
+      name="key_light"
+      pos="1.5 -1.5 3.0"
+      dir="-0.4 0.4 -1.0"
+      directional="true"
+      diffuse="0.9 0.9 0.9"
+      specular="0.2 0.2 0.2"/>
+    <geom
+      name="floor"
+      type="plane"
+      size="5 5 0.1"
+      material="grid_mat"
+      friction="1.0 0.1 0.1"/>
+
+    <body name="sphere_1" pos="-0.25 0.0 0.35">
+      <joint name="tx1" type="slide" axis="1 0 0" damping="1"/>
+      <joint name="ty1" type="slide" axis="0 1 0" damping="1"/>
+      <joint name="tz1" type="slide" axis="0 0 1" damping="1"/>
+      <geom
+        name="sphere_geom_1"
+        type="sphere"
+        size="0.08"
+        mass="1.0"
+        rgba="0.2 0.6 0.9 1"/>
+      <site name="payload_point_sphere_1" pos="0.0 0.0 0.0"/>
+    </body>
+
+    <body name="sphere_2" pos="0.25 0.0 0.35">
+      <joint name="tx2" type="slide" axis="1 0 0" damping="1"/>
+      <joint name="ty2" type="slide" axis="0 1 0" damping="1"/>
+      <joint name="tz2" type="slide" axis="0 0 1" damping="1"/>
+      <geom
+        name="sphere_geom_2"
+        type="sphere"
+        size="0.08"
+        mass="1.0"
+        rgba="0.9 0.4 0.2 1"/>
+      <site name="payload_point_sphere_2" pos="0.0 0.0 0.0"/>
+    </body>
+
+    <body name="payload" pos="0.0 0.0 0.9">
+      <joint name="payload" pos="0 0 0" type="free" damping="0.001"/>
+      <geom
+        name="payload_geom"
+        type="sphere"
+        size="0.05 0.05 0.05"
+        rgba="0 0 1 0.8"
+        mass="0.5"
+        friction="1.0 0.005 0.0001"/>
+      <site name="payload_point" pos="0.0 0.0 0.05"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor
+      name="tx1"
+      joint="tx1"
+      ctrllimited="true"
+      ctrlrange="-200 200"/>
+    <motor
+      name="ty1"
+      joint="ty1"
+      ctrllimited="true"
+      ctrlrange="-200 200"/>
+    <motor
+      name="tz1"
+      joint="tz1"
+      ctrllimited="true"
+      ctrlrange="-200 200"/>
+
+    <motor
+      name="tx2"
+      joint="tx2"
+      ctrllimited="true"
+      ctrlrange="-200 200"/>
+    <motor
+      name="ty2"
+      joint="ty2"
+      ctrllimited="true"
+      ctrlrange="-200 200"/>
+    <motor
+      name="tz2"
+      joint="tz2"
+      ctrllimited="true"
+      ctrlrange="-200 200"/>
+  </actuator>
+
+  <tendon>
+    <spatial name="rope_sphere_1" limited="true" range="0 1.0" width=".0007">
+      <site site="payload_point_sphere_1"/>
+      <site site="payload_point"/>
+    </spatial>
+    <spatial name="rope_sphere_2" limited="true" range="0 1.0" width=".0007">
+      <site site="payload_point_sphere_2"/>
+      <site site="payload_point"/>
+    </spatial>
+  </tendon>
+</mujoco>
