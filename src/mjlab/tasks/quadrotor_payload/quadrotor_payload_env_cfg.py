@@ -462,9 +462,9 @@ def quadrotor_payload_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
           "x": (-0.2, 0.2),
           "y": (-0.2, 0.2),
           "z": (-0.1, 0.1),
-          "roll": (-1.5, 1.5),
-          "pitch": (-1.5, 1.5),
-          "yaw": (-3.14159, 3.14159),
+          "roll": (-0.1, 0.1),
+          "pitch": (-0.1, 0.1),
+          "yaw": (-0.1, 0.1),
         },
         "velocity_range": {
           "x": (-0.1, 0.1),
