@@ -158,8 +158,10 @@ Where B = number of environments, N = number of rays.
 
 from __future__ import annotations
 
+import csv
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import mujoco
@@ -349,7 +351,182 @@ class PinholeCameraPatternCfg:
     return local_offsets, local_directions
 
 
-PatternCfg = GridPatternCfg | PinholeCameraPatternCfg
+@dataclass
+class LivoxCsvPatternCfg:
+  """Livox-style non-repetitive pattern loaded from Gazebo CSV scan tables.
+
+  The Gazebo Livox plugin stores per-ray spherical angles in CSV files
+  (typically ``time, azimuth, zenith``). This pattern class loads that
+  table and converts each row to a unit ray direction.
+  """
+
+  csv_path: str
+  """Path to CSV containing Livox scan entries."""
+
+  azimuth_col: int = 1
+  """Zero-based index of azimuth column when no header is present."""
+
+  zenith_col: int = 2
+  """Zero-based index of zenith column when no header is present."""
+
+  downsample: int = 1
+  """Keep every N-th ray from CSV (1 = keep all)."""
+
+  start_index: int = 0
+  """Start index into the loaded pattern (supports wrap-around)."""
+
+  num_rays: int | None = None
+  """Optional number of rays to take from pattern after downsampling."""
+
+  azimuth_offset_deg: float = 0.0
+  """Constant azimuth offset (degrees) applied to every ray."""
+
+  zenith_offset_deg: float = 0.0
+  """Constant zenith offset (degrees) applied to every ray."""
+
+  def generate_rays(
+    self, mj_model: mujoco.MjModel | None, device: str
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate rays from Livox scan CSV.
+
+    Args:
+      mj_model: MuJoCo model (unused for Livox CSV pattern).
+      device: Device for tensor operations.
+
+    Returns:
+      Tuple of (local_offsets [N, 3], local_directions [N, 3]).
+    """
+    del mj_model  # Unused for CSV patterns.
+
+    if self.downsample < 1:
+      raise ValueError(f"downsample must be >= 1, got {self.downsample}")
+    if self.start_index < 0:
+      raise ValueError(f"start_index must be >= 0, got {self.start_index}")
+    if self.num_rays is not None and self.num_rays <= 0:
+      raise ValueError(f"num_rays must be > 0 when set, got {self.num_rays}")
+
+    azimuth_deg, zenith_deg = self._load_angles()
+
+    azimuth = torch.tensor(
+      azimuth_deg, device=device, dtype=torch.float32
+    ) + self.azimuth_offset_deg
+    zenith = torch.tensor(zenith_deg, device=device, dtype=torch.float32)
+    zenith = zenith + self.zenith_offset_deg
+
+    if azimuth.numel() == 0:
+      raise ValueError(f"No valid rays parsed from CSV: {self.csv_path}")
+
+    if self.downsample > 1:
+      azimuth = azimuth[:: self.downsample]
+      zenith = zenith[:: self.downsample]
+
+    if azimuth.numel() == 0:
+      raise ValueError(
+        f"Pattern became empty after downsample={self.downsample} for {self.csv_path}"
+      )
+
+    if self.num_rays is not None:
+      idx = (
+        torch.arange(self.num_rays, device=device, dtype=torch.int64)
+        + self.start_index
+      ) % azimuth.numel()
+      azimuth = azimuth[idx]
+      zenith = zenith[idx]
+    elif self.start_index > 0:
+      idx = (
+        torch.arange(azimuth.numel(), device=device, dtype=torch.int64)
+        + self.start_index
+      ) % azimuth.numel()
+      azimuth = azimuth[idx]
+      zenith = zenith[idx]
+
+    # Livox scan tables use spherical angles in degrees:
+    # - azimuth: rotation around +Z, 0° at +X
+    # - zenith: angle from +Z (0°=up, 90°=horizontal, 180°=down)
+    azimuth_rad = torch.deg2rad(azimuth)
+    zenith_rad = torch.deg2rad(zenith)
+    sin_zenith = torch.sin(zenith_rad)
+
+    ray_x = sin_zenith * torch.cos(azimuth_rad)
+    ray_y = sin_zenith * torch.sin(azimuth_rad)
+    ray_z = torch.cos(zenith_rad)
+
+    local_directions = torch.stack([ray_x, ray_y, ray_z], dim=1)
+    local_directions = local_directions / local_directions.norm(dim=1, keepdim=True)
+    local_offsets = torch.zeros_like(local_directions)
+    return local_offsets, local_directions
+
+  def _load_angles(self) -> tuple[list[float], list[float]]:
+    """Parse azimuth/zenith columns from CSV scan table."""
+    csv_file = Path(self.csv_path).expanduser()
+    if not csv_file.exists():
+      raise FileNotFoundError(f"Livox CSV not found: {csv_file}")
+
+    with csv_file.open(newline="", encoding="utf-8") as f:
+      rows = list(csv.reader(f))
+
+    if not rows:
+      raise ValueError(f"CSV file is empty: {csv_file}")
+
+    first = [c.strip() for c in rows[0]]
+    has_header = not self._row_is_numeric(first)
+    data_rows = rows[1:] if has_header else rows
+
+    if has_header:
+      header = [c.strip().lower() for c in first]
+      azimuth_idx = self._find_header_idx(
+        header, preferred=("azimuth", "azi", "phi", "yaw"), fallback=self.azimuth_col
+      )
+      zenith_idx = self._find_header_idx(
+        header, preferred=("zenith", "theta", "inclination"), fallback=self.zenith_col
+      )
+    else:
+      azimuth_idx = self.azimuth_col
+      zenith_idx = self.zenith_col
+
+    azimuth_vals: list[float] = []
+    zenith_vals: list[float] = []
+    for i, row in enumerate(data_rows):
+      row = [c.strip() for c in row]
+      if not row or not any(row) or row[0].startswith("#"):
+        continue
+      if max(azimuth_idx, zenith_idx) >= len(row):
+        raise ValueError(
+          f"Row {i + 1} has {len(row)} columns, need indices "
+          f"{azimuth_idx} and {zenith_idx}"
+        )
+      try:
+        azimuth_vals.append(float(row[azimuth_idx]))
+        zenith_vals.append(float(row[zenith_idx]))
+      except ValueError as e:
+        raise ValueError(f"Invalid numeric value on row {i + 1}: {row}") from e
+
+    return azimuth_vals, zenith_vals
+
+  @staticmethod
+  def _row_is_numeric(values: list[str]) -> bool:
+    if not values:
+      return False
+    for v in values:
+      if v == "":
+        continue
+      try:
+        float(v)
+      except ValueError:
+        return False
+    return True
+
+  @staticmethod
+  def _find_header_idx(
+    header: list[str], preferred: tuple[str, ...], fallback: int
+  ) -> int:
+    for name in preferred:
+      if name in header:
+        return header.index(name)
+    return fallback
+
+
+PatternCfg = GridPatternCfg | PinholeCameraPatternCfg | LivoxCsvPatternCfg
 
 
 @dataclass
@@ -399,6 +576,21 @@ class RayCastSensorCfg(SensorCfg):
 
     hit_sphere_radius: float = 0.5
     """Radius of spheres drawn at hit points (multiplier of meansize)."""
+
+    accumulate_hits: bool = False
+    """Whether to keep a rolling point buffer across frames."""
+
+    accumulated_max_points: int = 5000
+    """Maximum number of accumulated hit points kept per environment."""
+
+    accumulated_render_points: int = 500
+    """Maximum number of accumulated points rendered each frame."""
+
+    publish_interval: float | None = None
+    """Optional period in seconds for publishing an accumulated cloud."""
+
+    render_published_hits: bool = False
+    """Whether to render the last published cloud instead of the live buffer."""
 
     show_rays: bool = False
     """Whether to draw ray arrows."""
@@ -493,6 +685,14 @@ class RayCastSensor(Sensor[RayCastData]):
     self._frame_local_pos: torch.Tensor | None = None
 
     self._ctx: SensorContext | None = None
+    self._accumulated_hit_pos: torch.Tensor | None = None
+    self._accumulated_counts: torch.Tensor | None = None
+    self._accumulated_cursor: torch.Tensor | None = None
+    self._published_hit_pos: torch.Tensor | None = None
+    self._published_counts: torch.Tensor | None = None
+    self._published_cursor: torch.Tensor | None = None
+    self._publish_elapsed: float = 0.0
+    self._publish_due: bool = False
 
   def edit_spec(
     self,
@@ -591,6 +791,16 @@ class RayCastSensor(Sensor[RayCastData]):
     self._pos_w = torch.zeros(num_envs, 3, device=device)
     self._quat_w = torch.zeros(num_envs, 4, device=device)
 
+    if self.cfg.viz.accumulate_hits:
+      max_points = self.cfg.viz.accumulated_max_points
+      self._accumulated_hit_pos = torch.zeros(num_envs, max_points, 3, device=device)
+      self._accumulated_counts = torch.zeros(num_envs, dtype=torch.int64, device=device)
+      self._accumulated_cursor = torch.zeros(num_envs, dtype=torch.int64, device=device)
+      if self.cfg.viz.publish_interval is not None:
+        self._published_hit_pos = torch.zeros(num_envs, max_points, 3, device=device)
+        self._published_counts = torch.zeros(num_envs, dtype=torch.int64, device=device)
+        self._published_cursor = torch.zeros(num_envs, dtype=torch.int64, device=device)
+
     assert self._wp_device is not None
 
   def set_context(self, ctx: SensorContext) -> None:
@@ -652,13 +862,13 @@ class RayCastSensor(Sensor[RayCastData]):
         "bij,j->bi", body_align, self._frame_local_pos
       )
 
-    rot_mats = self._compute_alignment_rotation(frame_mat.view(-1, 3, 3)).cpu().numpy()
-    origins = frame_pos.cpu().numpy()
-    offsets = self._local_offsets.cpu().numpy()
-    directions = self._local_directions.cpu().numpy()
-    hit_positions = data.hit_pos_w[env_indices].cpu().numpy()
-    distances = data.distances[env_indices].cpu().numpy()
-    normals = data.normals_w[env_indices].cpu().numpy()
+    rot_mats = self._compute_alignment_rotation(frame_mat.view(-1, 3, 3))
+    origins = frame_pos
+    offsets = self._local_offsets
+    directions = self._local_directions
+    hit_positions = data.hit_pos_w[env_indices]
+    distances = data.distances[env_indices]
+    normals = data.normals_w[env_indices]
 
     meansize = visualizer.meansize
     ray_width = 0.1 * meansize
@@ -670,10 +880,22 @@ class RayCastSensor(Sensor[RayCastData]):
 
     for k in range(len(env_indices)):
       rot = rot_mats[k]
+      env_id = env_indices[k]
+
+      if self.cfg.viz.accumulate_hits:
+        point_cloud = self._get_render_points(env_id)
+        if point_cloud is not None:
+          for i, point in enumerate(point_cloud):
+            visualizer.add_sphere(
+              center=point,
+              radius=sphere_radius,
+              color=self.cfg.viz.hit_sphere_color,
+              label=f"{name}_cloud_{i}",
+            )
 
       for i in range(self._num_rays):
         origin = origins[k] + rot @ offsets[i]
-        hit = distances[k, i] >= 0
+        hit = bool(distances[k, i] >= 0)
 
         if hit:
           end = hit_positions[k, i]
@@ -691,7 +913,7 @@ class RayCastSensor(Sensor[RayCastData]):
             label=f"{name}_ray_{i}",
           )
 
-        if hit:
+        if hit and not self.cfg.viz.accumulate_hits:
           visualizer.add_sphere(
             center=end,
             radius=sphere_radius,
@@ -796,6 +1018,154 @@ class RayCastSensor(Sensor[RayCastData]):
 
     self._pos_w = self._cached_frame_pos.clone()
     self._quat_w = quat_from_matrix(self._cached_frame_mat)
+    self._update_accumulated_hits(hit_pos_w, hit_mask)
+    self._publish_if_due()
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    super().reset(env_ids)
+    if self._accumulated_hit_pos is None:
+      return
+    if env_ids is None:
+      self._clear_buffers(slice(None))
+      self._publish_elapsed = 0.0
+      self._publish_due = False
+      return
+
+    if isinstance(env_ids, slice):
+      self._clear_buffers(env_ids)
+      return
+
+    self._clear_buffers(env_ids)
+
+  def update(self, dt: float) -> None:
+    super().update(dt)
+    if not self.cfg.viz.accumulate_hits or self.cfg.viz.publish_interval is None:
+      return
+    self._publish_elapsed += dt
+    if self._publish_elapsed >= self.cfg.viz.publish_interval:
+      self._publish_due = True
+      self._publish_elapsed = math.fmod(
+        self._publish_elapsed, self.cfg.viz.publish_interval
+      )
+
+  def _update_accumulated_hits(
+    self, hit_pos_w: torch.Tensor, hit_mask: torch.Tensor
+  ) -> None:
+    if self._accumulated_hit_pos is None:
+      return
+    assert self._accumulated_counts is not None
+    assert self._accumulated_cursor is not None
+
+    max_points = self._accumulated_hit_pos.shape[1]
+    num_envs = hit_pos_w.shape[0]
+    for env_idx in range(num_envs):
+      env_hits = hit_pos_w[env_idx, hit_mask[env_idx]]
+      num_hits = env_hits.shape[0]
+      if num_hits == 0:
+        continue
+
+      if num_hits >= max_points:
+        self._accumulated_hit_pos[env_idx] = env_hits[-max_points:]
+        self._accumulated_counts[env_idx] = max_points
+        self._accumulated_cursor[env_idx] = 0
+        continue
+
+      cursor = int(self._accumulated_cursor[env_idx].item())
+      next_cursor = cursor + num_hits
+      if next_cursor <= max_points:
+        self._accumulated_hit_pos[env_idx, cursor:next_cursor] = env_hits
+      else:
+        split = max_points - cursor
+        self._accumulated_hit_pos[env_idx, cursor:] = env_hits[:split]
+        self._accumulated_hit_pos[env_idx, : num_hits - split] = env_hits[split:]
+
+      self._accumulated_cursor[env_idx] = next_cursor % max_points
+      self._accumulated_counts[env_idx] = min(
+        int(self._accumulated_counts[env_idx].item()) + num_hits,
+        max_points,
+      )
+
+  def _publish_if_due(self) -> None:
+    if not self._publish_due or self._published_hit_pos is None:
+      return
+    assert self._published_counts is not None
+    assert self._published_cursor is not None
+    assert self._accumulated_hit_pos is not None
+    assert self._accumulated_counts is not None
+    assert self._accumulated_cursor is not None
+
+    self._published_hit_pos.copy_(self._accumulated_hit_pos)
+    self._published_counts.copy_(self._accumulated_counts)
+    self._published_cursor.copy_(self._accumulated_cursor)
+    self._accumulated_hit_pos.zero_()
+    self._accumulated_counts.zero_()
+    self._accumulated_cursor.zero_()
+    self._publish_due = False
+
+  def _clear_buffers(self, env_ids: torch.Tensor | slice) -> None:
+    assert self._accumulated_hit_pos is not None
+    assert self._accumulated_counts is not None
+    assert self._accumulated_cursor is not None
+    self._accumulated_hit_pos[env_ids] = 0.0
+    self._accumulated_counts[env_ids] = 0
+    self._accumulated_cursor[env_ids] = 0
+    if self._published_hit_pos is not None:
+      assert self._published_counts is not None
+      assert self._published_cursor is not None
+      self._published_hit_pos[env_ids] = 0.0
+      self._published_counts[env_ids] = 0
+      self._published_cursor[env_ids] = 0
+
+  def _get_render_points(self, env_idx: int) -> torch.Tensor | None:
+    if self.cfg.viz.render_published_hits and self._published_hit_pos is not None:
+      return self._get_points_from_buffer(
+        self._published_hit_pos,
+        self._published_counts,
+        self._published_cursor,
+        env_idx,
+      )
+    return self._get_points_from_buffer(
+      self._accumulated_hit_pos,
+      self._accumulated_counts,
+      self._accumulated_cursor,
+      env_idx,
+    )
+
+  def _get_points_from_buffer(
+    self,
+    points_buffer: torch.Tensor | None,
+    count_buffer: torch.Tensor | None,
+    cursor_buffer: torch.Tensor | None,
+    env_idx: int,
+  ) -> torch.Tensor | None:
+    if points_buffer is None or count_buffer is None:
+      return None
+
+    count = int(count_buffer[env_idx].item())
+    if count == 0:
+      return None
+
+    points = points_buffer[env_idx]
+    if cursor_buffer is not None and count == points.shape[0]:
+      cursor = int(cursor_buffer[env_idx].item())
+      if cursor != 0:
+        points = torch.roll(points, shifts=-cursor, dims=0)
+    else:
+      points = points[:count]
+
+    render_count = min(count, self.cfg.viz.accumulated_render_points)
+    if render_count <= 0:
+      return None
+    if render_count < count:
+      idx = torch.linspace(
+        0,
+        count - 1,
+        render_count,
+        device=points.device,
+        dtype=torch.float32,
+      ).round().to(torch.int64)
+      points = points[idx]
+    return points
 
   def _compute_alignment_rotation(self, frame_mat: torch.Tensor) -> torch.Tensor:
     """Compute rotation matrix based on ray_alignment setting."""

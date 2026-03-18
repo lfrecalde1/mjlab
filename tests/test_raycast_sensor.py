@@ -14,6 +14,7 @@ from mjlab.envs.mdp.observations import height_scan
 from mjlab.scene import Scene, SceneCfg
 from mjlab.sensor import (
   GridPatternCfg,
+  LivoxCsvPatternCfg,
   ObjRef,
   PinholeCameraPatternCfg,
   RayCastData,
@@ -52,6 +53,54 @@ def _make_scene_and_sim(
   if scene.sensor_context is not None:
     sim.set_sensor_context(scene.sensor_context)
   return scene, sim
+
+
+class _CountingVisualizer:
+  def __init__(self):
+    self.env_idx = 0
+    self.show_all_envs = False
+    self._meansize = 0.1
+    self.num_spheres = 0
+
+  @property
+  def meansize(self) -> float:
+    return self._meansize
+
+  def get_env_indices(self, num_envs: int):
+    return [0] if num_envs > 0 else []
+
+  def add_arrow(self, start, end, color, width=0.015, label=None) -> None:
+    del start, end, color, width, label
+
+  def add_ghost_mesh(
+    self, qpos, model, mocap_pos=None, mocap_quat=None, alpha=0.5, label=None
+  ) -> None:
+    del qpos, model, mocap_pos, mocap_quat, alpha, label
+
+  def add_frame(
+    self,
+    position,
+    rotation_matrix,
+    scale=0.3,
+    label=None,
+    axis_radius=0.01,
+    alpha=1.0,
+    axis_colors=None,
+  ) -> None:
+    del position, rotation_matrix, scale, label, axis_radius, alpha, axis_colors
+
+  def add_sphere(self, center, radius, color, label=None) -> None:
+    del center, radius, color, label
+    self.num_spheres += 1
+
+  def add_cylinder(self, start, end, radius, color, label=None) -> None:
+    del start, end, radius, color, label
+
+  def add_ellipsoid(self, center, size, mat, color, label=None) -> None:
+    del center, size, mat, color, label
+
+  def clear(self) -> None:
+    self.num_spheres = 0
 
 
 @pytest.fixture(scope="module")
@@ -664,6 +713,96 @@ def test_pinhole_from_mujoco_camera_fovy_mode(device):
   sim.sense()
   data = sensor.data
   assert torch.all(data.distances >= 0)  # Should hit floor
+
+
+def test_livox_csv_pattern_generates_expected_directions(tmp_path):
+  """Livox CSV pattern should parse azimuth/zenith and output unit rays."""
+  csv_path = tmp_path / "mid360_small.csv"
+  csv_path.write_text(
+    "time,azimuth,zenith\n"
+    "0,0,90\n"  # +X
+    "1,90,90\n"  # +Y
+    "2,0,180\n",  # -Z
+    encoding="utf-8",
+  )
+
+  cfg = LivoxCsvPatternCfg(csv_path=str(csv_path))
+  offsets, directions = cfg.generate_rays(mj_model=None, device="cpu")
+
+  assert offsets.shape == (3, 3)
+  assert directions.shape == (3, 3)
+  expected = torch.tensor(
+    [
+      [1.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0],
+      [0.0, 0.0, -1.0],
+    ]
+  )
+  assert torch.allclose(directions, expected, atol=1e-5)
+
+
+def test_livox_csv_pattern_downsample_and_window(tmp_path):
+  """Livox CSV pattern supports downsampling and wrapped window slicing."""
+  csv_path = tmp_path / "mid360_window.csv"
+  csv_path.write_text(
+    "time,azimuth,zenith\n"
+    "0,0,90\n"  # +X
+    "1,90,90\n"  # +Y
+    "2,180,90\n"  # -X
+    "3,270,90\n",  # -Y
+    encoding="utf-8",
+  )
+
+  cfg = LivoxCsvPatternCfg(
+    csv_path=str(csv_path),
+    downsample=2,  # keep rows 0 and 2
+    start_index=1,
+    num_rays=3,  # wrapped: 2nd, 1st, 2nd of downsampled set
+  )
+  _, directions = cfg.generate_rays(mj_model=None, device="cpu")
+
+  expected = torch.tensor(
+    [
+      [-1.0, 0.0, 0.0],
+      [1.0, 0.0, 0.0],
+      [-1.0, 0.0, 0.0],
+    ]
+  )
+  assert torch.allclose(directions, expected, atol=1e-5)
+
+
+def test_raycast_accumulates_and_renders_capped_points(robot_with_floor_xml, device):
+  raycast_cfg = RayCastSensorCfg(
+    name="terrain_scan",
+    frame=ObjRef(type="body", name="base", entity="robot"),
+    pattern=GridPatternCfg(
+      size=(0.3, 0.3),
+      resolution=0.15,
+      direction=(0.0, 0.0, -1.0),
+    ),
+    max_distance=10.0,
+    debug_vis=True,
+    viz=RayCastSensorCfg.VizCfg(
+      accumulate_hits=True,
+      accumulated_max_points=10,
+      accumulated_render_points=3,
+    ),
+  )
+
+  scene, sim = _make_scene_and_sim(device, robot_with_floor_xml, sensors=(raycast_cfg,))
+  sensor = scene["terrain_scan"]
+
+  sim.step()
+  sim.sense()
+  sim.step()
+  sim.sense()
+
+  visualizer = _CountingVisualizer()
+  sensor.debug_vis(visualizer)
+
+  assert sensor._accumulated_counts is not None
+  assert int(sensor._accumulated_counts[0].item()) == 10
+  assert visualizer.num_spheres == 3
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Likely bug on CPU MjWarp")

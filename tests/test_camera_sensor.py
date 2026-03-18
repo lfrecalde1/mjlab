@@ -194,6 +194,49 @@ def test_camera_wrap_existing_overrides_fovy(device):
   assert data.rgb is not None
 
 
+def test_camera_wraps_entity_camera(device):
+  """Wrapping a camera inside an attached entity should work."""
+  xml = """
+    <mujoco>
+      <worldbody>
+        <body name="drone_0">
+          <geom name="body" type="box" size="0.2 0.2 0.1" rgba="1 0 0 1"/>
+          <camera name="drone_0_camera" pos="0 -2 1" quat="0.70710678 0.70710678 0 0"
+                  fovy="45" resolution="32 24"/>
+        </body>
+      </worldbody>
+    </mujoco>
+  """
+  entity_cfg = EntityCfg(spec_fn=lambda: mujoco.MjSpec.from_string(xml))
+  scene_cfg = SceneCfg(
+    num_envs=2,
+    env_spacing=5.0,
+    entities={"quadrotor": entity_cfg},
+    sensors=(
+      CameraSensorCfg(
+        name="test_cam",
+        camera_name="quadrotor/drone_0_camera",
+        width=32,
+        height=24,
+        data_types=("rgb",),
+      ),
+    ),
+  )
+  scene = Scene(scene_cfg, device)
+  model = scene.compile()
+  sim = Simulation(num_envs=2, cfg=SimulationCfg(), model=model, device=device)
+  scene.initialize(sim.mj_model, sim.model, sim.data)
+  if scene.sensor_context is not None:
+    sim.set_sensor_context(scene.sensor_context)
+
+  sim.forward()
+  sim.sense()
+  data = scene["test_cam"].data
+
+  assert data.rgb is not None
+  assert data.rgb.shape == (2, 24, 32, 3)
+
+
 @pytest.mark.skipif(
   not torch.cuda.is_available(), reason="CUDA required for sense graph"
 )

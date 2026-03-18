@@ -77,7 +77,7 @@ emitted from the sensor frame.
 
 .. code-block:: python
 
-    from mjlab.sensor import GridPatternCfg, PinholeCameraPatternCfg
+    from mjlab.sensor import GridPatternCfg, LivoxCsvPatternCfg, PinholeCameraPatternCfg
 
     # Parallel grid: fixed footprint, height-invariant.
     grid = GridPatternCfg(
@@ -101,6 +101,13 @@ emitted from the sensor frame.
         intrinsic_matrix=[500, 0, 320, 0, 500, 240, 0, 0, 1],
         width=640,
         height=480,
+    )
+
+    # Livox Gazebo scan-table pattern (time, azimuth, zenith CSV).
+    livox = LivoxCsvPatternCfg(
+        csv_path="/path/to/mid360.csv",
+        downsample=2,
+        num_rays=12000,
     )
 
 

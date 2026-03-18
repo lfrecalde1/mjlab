@@ -152,7 +152,11 @@ class CameraSensor(Sensor[CameraSensorData]):
 
     if self._is_wrapping_existing:
       cam = scene_spec.camera(self._camera_name)
-      assert isinstance(cam, mujoco.MjsCamera)
+      if cam is None:
+        available = [spec_cam.name for spec_cam in scene_spec.cameras]
+        raise ValueError(
+          f"Camera '{self._camera_name}' not found in spec. Available: {available}"
+        )
       if self.cfg.fovy is not None:
         cam.fovy = self.cfg.fovy
       if self.cfg.orthographic:
