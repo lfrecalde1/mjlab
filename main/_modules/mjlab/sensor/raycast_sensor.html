@@ -558,8 +558,10 @@ document.write(`
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
 
+<span class="kn">import</span><span class="w"> </span><span class="nn">csv</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TYPE_CHECKING</span><span class="p">,</span> <span class="n">Literal</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">mujoco</span>
@@ -767,7 +769,182 @@ document.write(`
 
 
 
-<span class="n">PatternCfg</span> <span class="o">=</span> <span class="n">GridPatternCfg</span> <span class="o">|</span> <span class="n">PinholeCameraPatternCfg</span>
+<span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">LivoxCsvPatternCfg</span><span class="p">:</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Livox-style non-repetitive pattern loaded from Gazebo CSV scan tables.</span>
+
+<span class="sd">  The Gazebo Livox plugin stores per-ray spherical angles in CSV files</span>
+<span class="sd">  (typically ``time, azimuth, zenith``). This pattern class loads that</span>
+<span class="sd">  table and converts each row to a unit ray direction.</span>
+<span class="sd">  &quot;&quot;&quot;</span>
+
+  <span class="n">csv_path</span><span class="p">:</span> <span class="nb">str</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Path to CSV containing Livox scan entries.&quot;&quot;&quot;</span>
+
+  <span class="n">azimuth_col</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Zero-based index of azimuth column when no header is present.&quot;&quot;&quot;</span>
+
+  <span class="n">zenith_col</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Zero-based index of zenith column when no header is present.&quot;&quot;&quot;</span>
+
+  <span class="n">downsample</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Keep every N-th ray from CSV (1 = keep all).&quot;&quot;&quot;</span>
+
+  <span class="n">start_index</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Start index into the loaded pattern (supports wrap-around).&quot;&quot;&quot;</span>
+
+  <span class="n">num_rays</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Optional number of rays to take from pattern after downsampling.&quot;&quot;&quot;</span>
+
+  <span class="n">azimuth_offset_deg</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Constant azimuth offset (degrees) applied to every ray.&quot;&quot;&quot;</span>
+
+  <span class="n">zenith_offset_deg</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+<span class="w">  </span><span class="sd">&quot;&quot;&quot;Constant zenith offset (degrees) applied to every ray.&quot;&quot;&quot;</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">generate_rays</span><span class="p">(</span>
+    <span class="bp">self</span><span class="p">,</span> <span class="n">mj_model</span><span class="p">:</span> <span class="n">mujoco</span><span class="o">.</span><span class="n">MjModel</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="n">device</span><span class="p">:</span> <span class="nb">str</span>
+  <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Generate rays from Livox scan CSV.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">      mj_model: MuJoCo model (unused for Livox CSV pattern).</span>
+<span class="sd">      device: Device for tensor operations.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">      Tuple of (local_offsets [N, 3], local_directions [N, 3]).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">del</span> <span class="n">mj_model</span>  <span class="c1"># Unused for CSV patterns.</span>
+
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">downsample</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+      <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;downsample must be &gt;= 1, got </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">downsample</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">start_index</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+      <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;start_index must be &gt;= 0, got </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">start_index</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_rays</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_rays</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+      <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;num_rays must be &gt; 0 when set, got </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">num_rays</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="n">azimuth_deg</span><span class="p">,</span> <span class="n">zenith_deg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_load_angles</span><span class="p">()</span>
+
+    <span class="n">azimuth</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span>
+      <span class="n">azimuth_deg</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span>
+    <span class="p">)</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">azimuth_offset_deg</span>
+    <span class="n">zenith</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="n">zenith_deg</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+    <span class="n">zenith</span> <span class="o">=</span> <span class="n">zenith</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">zenith_offset_deg</span>
+
+    <span class="k">if</span> <span class="n">azimuth</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+      <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;No valid rays parsed from CSV: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">csv_path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">downsample</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+      <span class="n">azimuth</span> <span class="o">=</span> <span class="n">azimuth</span><span class="p">[::</span> <span class="bp">self</span><span class="o">.</span><span class="n">downsample</span><span class="p">]</span>
+      <span class="n">zenith</span> <span class="o">=</span> <span class="n">zenith</span><span class="p">[::</span> <span class="bp">self</span><span class="o">.</span><span class="n">downsample</span><span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">azimuth</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+      <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;Pattern became empty after downsample=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">downsample</span><span class="si">}</span><span class="s2"> for </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">csv_path</span><span class="si">}</span><span class="s2">&quot;</span>
+      <span class="p">)</span>
+
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_rays</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="n">idx</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">num_rays</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+        <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">start_index</span>
+      <span class="p">)</span> <span class="o">%</span> <span class="n">azimuth</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span>
+      <span class="n">azimuth</span> <span class="o">=</span> <span class="n">azimuth</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+      <span class="n">zenith</span> <span class="o">=</span> <span class="n">zenith</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+    <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">start_index</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+      <span class="n">idx</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">azimuth</span><span class="o">.</span><span class="n">numel</span><span class="p">(),</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+        <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">start_index</span>
+      <span class="p">)</span> <span class="o">%</span> <span class="n">azimuth</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span>
+      <span class="n">azimuth</span> <span class="o">=</span> <span class="n">azimuth</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+      <span class="n">zenith</span> <span class="o">=</span> <span class="n">zenith</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+
+    <span class="c1"># Livox scan tables use spherical angles in degrees:</span>
+    <span class="c1"># - azimuth: rotation around +Z, 0° at +X</span>
+    <span class="c1"># - zenith: angle from +Z (0°=up, 90°=horizontal, 180°=down)</span>
+    <span class="n">azimuth_rad</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">deg2rad</span><span class="p">(</span><span class="n">azimuth</span><span class="p">)</span>
+    <span class="n">zenith_rad</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">deg2rad</span><span class="p">(</span><span class="n">zenith</span><span class="p">)</span>
+    <span class="n">sin_zenith</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">zenith_rad</span><span class="p">)</span>
+
+    <span class="n">ray_x</span> <span class="o">=</span> <span class="n">sin_zenith</span> <span class="o">*</span> <span class="n">torch</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">azimuth_rad</span><span class="p">)</span>
+    <span class="n">ray_y</span> <span class="o">=</span> <span class="n">sin_zenith</span> <span class="o">*</span> <span class="n">torch</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">azimuth_rad</span><span class="p">)</span>
+    <span class="n">ray_z</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">zenith_rad</span><span class="p">)</span>
+
+    <span class="n">local_directions</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">ray_x</span><span class="p">,</span> <span class="n">ray_y</span><span class="p">,</span> <span class="n">ray_z</span><span class="p">],</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">local_directions</span> <span class="o">=</span> <span class="n">local_directions</span> <span class="o">/</span> <span class="n">local_directions</span><span class="o">.</span><span class="n">norm</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdim</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">local_offsets</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">local_directions</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">local_offsets</span><span class="p">,</span> <span class="n">local_directions</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">_load_angles</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Parse azimuth/zenith columns from CSV scan table.&quot;&quot;&quot;</span>
+    <span class="n">csv_file</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">csv_path</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">csv_file</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+      <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Livox CSV not found: </span><span class="si">{</span><span class="n">csv_file</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="k">with</span> <span class="n">csv_file</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">newline</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+      <span class="n">rows</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">csv</span><span class="o">.</span><span class="n">reader</span><span class="p">(</span><span class="n">f</span><span class="p">))</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">rows</span><span class="p">:</span>
+      <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;CSV file is empty: </span><span class="si">{</span><span class="n">csv_file</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="n">first</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span>
+    <span class="n">has_header</span> <span class="o">=</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_row_is_numeric</span><span class="p">(</span><span class="n">first</span><span class="p">)</span>
+    <span class="n">data_rows</span> <span class="o">=</span> <span class="n">rows</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span> <span class="k">if</span> <span class="n">has_header</span> <span class="k">else</span> <span class="n">rows</span>
+
+    <span class="k">if</span> <span class="n">has_header</span><span class="p">:</span>
+      <span class="n">header</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">first</span><span class="p">]</span>
+      <span class="n">azimuth_idx</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_find_header_idx</span><span class="p">(</span>
+        <span class="n">header</span><span class="p">,</span> <span class="n">preferred</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;azimuth&quot;</span><span class="p">,</span> <span class="s2">&quot;azi&quot;</span><span class="p">,</span> <span class="s2">&quot;phi&quot;</span><span class="p">,</span> <span class="s2">&quot;yaw&quot;</span><span class="p">),</span> <span class="n">fallback</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">azimuth_col</span>
+      <span class="p">)</span>
+      <span class="n">zenith_idx</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_find_header_idx</span><span class="p">(</span>
+        <span class="n">header</span><span class="p">,</span> <span class="n">preferred</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;zenith&quot;</span><span class="p">,</span> <span class="s2">&quot;theta&quot;</span><span class="p">,</span> <span class="s2">&quot;inclination&quot;</span><span class="p">),</span> <span class="n">fallback</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">zenith_col</span>
+      <span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+      <span class="n">azimuth_idx</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">azimuth_col</span>
+      <span class="n">zenith_idx</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">zenith_col</span>
+
+    <span class="n">azimuth_vals</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">zenith_vals</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">data_rows</span><span class="p">):</span>
+      <span class="n">row</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">row</span><span class="p">]</span>
+      <span class="k">if</span> <span class="ow">not</span> <span class="n">row</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">any</span><span class="p">(</span><span class="n">row</span><span class="p">)</span> <span class="ow">or</span> <span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;#&quot;</span><span class="p">):</span>
+        <span class="k">continue</span>
+      <span class="k">if</span> <span class="nb">max</span><span class="p">(</span><span class="n">azimuth_idx</span><span class="p">,</span> <span class="n">zenith_idx</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="nb">len</span><span class="p">(</span><span class="n">row</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+          <span class="sa">f</span><span class="s2">&quot;Row </span><span class="si">{</span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2"> has </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">row</span><span class="p">)</span><span class="si">}</span><span class="s2"> columns, need indices &quot;</span>
+          <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">azimuth_idx</span><span class="si">}</span><span class="s2"> and </span><span class="si">{</span><span class="n">zenith_idx</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="p">)</span>
+      <span class="k">try</span><span class="p">:</span>
+        <span class="n">azimuth_vals</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="n">azimuth_idx</span><span class="p">]))</span>
+        <span class="n">zenith_vals</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="n">zenith_idx</span><span class="p">]))</span>
+      <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Invalid numeric value on row </span><span class="si">{</span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">row</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">e</span>
+
+    <span class="k">return</span> <span class="n">azimuth_vals</span><span class="p">,</span> <span class="n">zenith_vals</span>
+
+  <span class="nd">@staticmethod</span>
+  <span class="k">def</span><span class="w"> </span><span class="nf">_row_is_numeric</span><span class="p">(</span><span class="n">values</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">values</span><span class="p">:</span>
+      <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">values</span><span class="p">:</span>
+      <span class="k">if</span> <span class="n">v</span> <span class="o">==</span> <span class="s2">&quot;&quot;</span><span class="p">:</span>
+        <span class="k">continue</span>
+      <span class="k">try</span><span class="p">:</span>
+        <span class="nb">float</span><span class="p">(</span><span class="n">v</span><span class="p">)</span>
+      <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">return</span> <span class="kc">True</span>
+
+  <span class="nd">@staticmethod</span>
+  <span class="k">def</span><span class="w"> </span><span class="nf">_find_header_idx</span><span class="p">(</span>
+    <span class="n">header</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">preferred</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span> <span class="n">fallback</span><span class="p">:</span> <span class="nb">int</span>
+  <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">preferred</span><span class="p">:</span>
+      <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">header</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">header</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">fallback</span>
+
+
+<span class="n">PatternCfg</span> <span class="o">=</span> <span class="n">GridPatternCfg</span> <span class="o">|</span> <span class="n">PinholeCameraPatternCfg</span> <span class="o">|</span> <span class="n">LivoxCsvPatternCfg</span>
 
 
 <div class="viewcode-block" id="RayCastData">
@@ -824,6 +1001,21 @@ document.write(`
 
     <span class="n">hit_sphere_radius</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.5</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Radius of spheres drawn at hit points (multiplier of meansize).&quot;&quot;&quot;</span>
+
+    <span class="n">accumulate_hits</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Whether to keep a rolling point buffer across frames.&quot;&quot;&quot;</span>
+
+    <span class="n">accumulated_max_points</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5000</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Maximum number of accumulated hit points kept per environment.&quot;&quot;&quot;</span>
+
+    <span class="n">accumulated_render_points</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">500</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Maximum number of accumulated points rendered each frame.&quot;&quot;&quot;</span>
+
+    <span class="n">publish_interval</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Optional period in seconds for publishing an accumulated cloud.&quot;&quot;&quot;</span>
+
+    <span class="n">render_published_hits</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Whether to render the last published cloud instead of the live buffer.&quot;&quot;&quot;</span>
 
     <span class="n">show_rays</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Whether to draw ray arrows.&quot;&quot;&quot;</span>
@@ -926,7 +1118,15 @@ document.write(`
 
     <span class="bp">self</span><span class="o">.</span><span class="n">_frame_local_pos</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
 
-    <span class="bp">self</span><span class="o">.</span><span class="n">_ctx</span><span class="p">:</span> <span class="n">SensorContext</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_ctx</span><span class="p">:</span> <span class="n">SensorContext</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_published_counts</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_published_cursor</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_publish_elapsed</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_publish_due</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span></div>
 
 
 <div class="viewcode-block" id="RayCastSensor.edit_spec">
@@ -1031,6 +1231,16 @@ document.write(`
     <span class="bp">self</span><span class="o">.</span><span class="n">_pos_w</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
     <span class="bp">self</span><span class="o">.</span><span class="n">_quat_w</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
 
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">accumulate_hits</span><span class="p">:</span>
+      <span class="n">max_points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">accumulated_max_points</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="n">max_points</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+      <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">publish_interval</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="n">max_points</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published_counts</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published_cursor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">num_envs</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+
     <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wp_device</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></div>
 
 
@@ -1098,13 +1308,13 @@ document.write(`
         <span class="s2">&quot;bij,j-&gt;bi&quot;</span><span class="p">,</span> <span class="n">body_align</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_frame_local_pos</span>
       <span class="p">)</span>
 
-    <span class="n">rot_mats</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_alignment_rotation</span><span class="p">(</span><span class="n">frame_mat</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">))</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
-    <span class="n">origins</span> <span class="o">=</span> <span class="n">frame_pos</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
-    <span class="n">offsets</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_offsets</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
-    <span class="n">directions</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_directions</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
-    <span class="n">hit_positions</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">hit_pos_w</span><span class="p">[</span><span class="n">env_indices</span><span class="p">]</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
-    <span class="n">distances</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">distances</span><span class="p">[</span><span class="n">env_indices</span><span class="p">]</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
-    <span class="n">normals</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">normals_w</span><span class="p">[</span><span class="n">env_indices</span><span class="p">]</span><span class="o">.</span><span class="n">cpu</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+    <span class="n">rot_mats</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_compute_alignment_rotation</span><span class="p">(</span><span class="n">frame_mat</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">))</span>
+    <span class="n">origins</span> <span class="o">=</span> <span class="n">frame_pos</span>
+    <span class="n">offsets</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_offsets</span>
+    <span class="n">directions</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_local_directions</span>
+    <span class="n">hit_positions</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">hit_pos_w</span><span class="p">[</span><span class="n">env_indices</span><span class="p">]</span>
+    <span class="n">distances</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">distances</span><span class="p">[</span><span class="n">env_indices</span><span class="p">]</span>
+    <span class="n">normals</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">normals_w</span><span class="p">[</span><span class="n">env_indices</span><span class="p">]</span>
 
     <span class="n">meansize</span> <span class="o">=</span> <span class="n">visualizer</span><span class="o">.</span><span class="n">meansize</span>
     <span class="n">ray_width</span> <span class="o">=</span> <span class="mf">0.1</span> <span class="o">*</span> <span class="n">meansize</span>
@@ -1116,10 +1326,22 @@ document.write(`
 
     <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">env_indices</span><span class="p">)):</span>
       <span class="n">rot</span> <span class="o">=</span> <span class="n">rot_mats</span><span class="p">[</span><span class="n">k</span><span class="p">]</span>
+      <span class="n">env_id</span> <span class="o">=</span> <span class="n">env_indices</span><span class="p">[</span><span class="n">k</span><span class="p">]</span>
+
+      <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">accumulate_hits</span><span class="p">:</span>
+        <span class="n">point_cloud</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_render_points</span><span class="p">(</span><span class="n">env_id</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">point_cloud</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+          <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">point</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">point_cloud</span><span class="p">):</span>
+            <span class="n">visualizer</span><span class="o">.</span><span class="n">add_sphere</span><span class="p">(</span>
+              <span class="n">center</span><span class="o">=</span><span class="n">point</span><span class="p">,</span>
+              <span class="n">radius</span><span class="o">=</span><span class="n">sphere_radius</span><span class="p">,</span>
+              <span class="n">color</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">hit_sphere_color</span><span class="p">,</span>
+              <span class="n">label</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">_cloud_</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="p">)</span>
 
       <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_rays</span><span class="p">):</span>
         <span class="n">origin</span> <span class="o">=</span> <span class="n">origins</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">+</span> <span class="n">rot</span> <span class="o">@</span> <span class="n">offsets</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
-        <span class="n">hit</span> <span class="o">=</span> <span class="n">distances</span><span class="p">[</span><span class="n">k</span><span class="p">,</span> <span class="n">i</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mi">0</span>
+        <span class="n">hit</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">distances</span><span class="p">[</span><span class="n">k</span><span class="p">,</span> <span class="n">i</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="n">hit</span><span class="p">:</span>
           <span class="n">end</span> <span class="o">=</span> <span class="n">hit_positions</span><span class="p">[</span><span class="n">k</span><span class="p">,</span> <span class="n">i</span><span class="p">]</span>
@@ -1137,7 +1359,7 @@ document.write(`
             <span class="n">label</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">_ray_</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
           <span class="p">)</span>
 
-        <span class="k">if</span> <span class="n">hit</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">hit</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">accumulate_hits</span><span class="p">:</span>
           <span class="n">visualizer</span><span class="o">.</span><span class="n">add_sphere</span><span class="p">(</span>
             <span class="n">center</span><span class="o">=</span><span class="n">end</span><span class="p">,</span>
             <span class="n">radius</span><span class="o">=</span><span class="n">sphere_radius</span><span class="p">,</span>
@@ -1250,8 +1472,162 @@ document.write(`
     <span class="bp">self</span><span class="o">.</span><span class="n">_normals_w</span><span class="p">[</span><span class="o">~</span><span class="n">hit_mask</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.0</span>
 
     <span class="bp">self</span><span class="o">.</span><span class="n">_pos_w</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cached_frame_pos</span><span class="o">.</span><span class="n">clone</span><span class="p">()</span>
-    <span class="bp">self</span><span class="o">.</span><span class="n">_quat_w</span> <span class="o">=</span> <span class="n">quat_from_matrix</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_cached_frame_mat</span><span class="p">)</span></div>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_quat_w</span> <span class="o">=</span> <span class="n">quat_from_matrix</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_cached_frame_mat</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_update_accumulated_hits</span><span class="p">(</span><span class="n">hit_pos_w</span><span class="p">,</span> <span class="n">hit_mask</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_publish_if_due</span><span class="p">()</span></div>
 
+
+<div class="viewcode-block" id="RayCastSensor.reset">
+<a class="viewcode-back" href="../../../source/api/sensor.html#mjlab.sensor.RayCastSensor.reset">[docs]</a>
+  <span class="k">def</span><span class="w"> </span><span class="nf">reset</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">env_ids</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="nb">slice</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">reset</span><span class="p">(</span><span class="n">env_ids</span><span class="p">)</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="k">return</span>
+    <span class="k">if</span> <span class="n">env_ids</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_clear_buffers</span><span class="p">(</span><span class="nb">slice</span><span class="p">(</span><span class="kc">None</span><span class="p">))</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_publish_elapsed</span> <span class="o">=</span> <span class="mf">0.0</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_publish_due</span> <span class="o">=</span> <span class="kc">False</span>
+      <span class="k">return</span>
+
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">env_ids</span><span class="p">,</span> <span class="nb">slice</span><span class="p">):</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_clear_buffers</span><span class="p">(</span><span class="n">env_ids</span><span class="p">)</span>
+      <span class="k">return</span>
+
+    <span class="bp">self</span><span class="o">.</span><span class="n">_clear_buffers</span><span class="p">(</span><span class="n">env_ids</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="RayCastSensor.update">
+<a class="viewcode-back" href="../../../source/api/sensor.html#mjlab.sensor.RayCastSensor.update">[docs]</a>
+  <span class="k">def</span><span class="w"> </span><span class="nf">update</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">dt</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">accumulate_hits</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">publish_interval</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="k">return</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_publish_elapsed</span> <span class="o">+=</span> <span class="n">dt</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish_elapsed</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">publish_interval</span><span class="p">:</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_publish_due</span> <span class="o">=</span> <span class="kc">True</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_publish_elapsed</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">fmod</span><span class="p">(</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_publish_elapsed</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">publish_interval</span>
+      <span class="p">)</span></div>
+
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">_update_accumulated_hits</span><span class="p">(</span>
+    <span class="bp">self</span><span class="p">,</span> <span class="n">hit_pos_w</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">hit_mask</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span>
+  <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="k">return</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+
+    <span class="n">max_points</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">num_envs</span> <span class="o">=</span> <span class="n">hit_pos_w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="k">for</span> <span class="n">env_idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_envs</span><span class="p">):</span>
+      <span class="n">env_hits</span> <span class="o">=</span> <span class="n">hit_pos_w</span><span class="p">[</span><span class="n">env_idx</span><span class="p">,</span> <span class="n">hit_mask</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]]</span>
+      <span class="n">num_hits</span> <span class="o">=</span> <span class="n">env_hits</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+      <span class="k">if</span> <span class="n">num_hits</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">continue</span>
+
+      <span class="k">if</span> <span class="n">num_hits</span> <span class="o">&gt;=</span> <span class="n">max_points</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">env_hits</span><span class="p">[</span><span class="o">-</span><span class="n">max_points</span><span class="p">:]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">max_points</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">continue</span>
+
+      <span class="n">cursor</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span><span class="o">.</span><span class="n">item</span><span class="p">())</span>
+      <span class="n">next_cursor</span> <span class="o">=</span> <span class="n">cursor</span> <span class="o">+</span> <span class="n">num_hits</span>
+      <span class="k">if</span> <span class="n">next_cursor</span> <span class="o">&lt;=</span> <span class="n">max_points</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">[</span><span class="n">env_idx</span><span class="p">,</span> <span class="n">cursor</span><span class="p">:</span><span class="n">next_cursor</span><span class="p">]</span> <span class="o">=</span> <span class="n">env_hits</span>
+      <span class="k">else</span><span class="p">:</span>
+        <span class="n">split</span> <span class="o">=</span> <span class="n">max_points</span> <span class="o">-</span> <span class="n">cursor</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">[</span><span class="n">env_idx</span><span class="p">,</span> <span class="n">cursor</span><span class="p">:]</span> <span class="o">=</span> <span class="n">env_hits</span><span class="p">[:</span><span class="n">split</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">[</span><span class="n">env_idx</span><span class="p">,</span> <span class="p">:</span> <span class="n">num_hits</span> <span class="o">-</span> <span class="n">split</span><span class="p">]</span> <span class="o">=</span> <span class="n">env_hits</span><span class="p">[</span><span class="n">split</span><span class="p">:]</span>
+
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">next_cursor</span> <span class="o">%</span> <span class="n">max_points</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span>
+        <span class="nb">int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span><span class="o">.</span><span class="n">item</span><span class="p">())</span> <span class="o">+</span> <span class="n">num_hits</span><span class="p">,</span>
+        <span class="n">max_points</span><span class="p">,</span>
+      <span class="p">)</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">_publish_if_due</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish_due</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="k">return</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published_counts</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published_cursor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+
+    <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_published_counts</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_published_cursor</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="o">.</span><span class="n">zero_</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="o">.</span><span class="n">zero_</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="o">.</span><span class="n">zero_</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_publish_due</span> <span class="o">=</span> <span class="kc">False</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">_clear_buffers</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">env_ids</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="nb">slice</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">[</span><span class="n">env_ids</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="p">[</span><span class="n">env_ids</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="p">[</span><span class="n">env_ids</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published_counts</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+      <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published_cursor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span><span class="p">[</span><span class="n">env_ids</span><span class="p">]</span> <span class="o">=</span> <span class="mf">0.0</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_published_counts</span><span class="p">[</span><span class="n">env_ids</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_published_cursor</span><span class="p">[</span><span class="n">env_ids</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">_get_render_points</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">env_idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">render_published_hits</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_points_from_buffer</span><span class="p">(</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published_hit_pos</span><span class="p">,</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published_counts</span><span class="p">,</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published_cursor</span><span class="p">,</span>
+        <span class="n">env_idx</span><span class="p">,</span>
+      <span class="p">)</span>
+    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_points_from_buffer</span><span class="p">(</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_hit_pos</span><span class="p">,</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_counts</span><span class="p">,</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">_accumulated_cursor</span><span class="p">,</span>
+      <span class="n">env_idx</span><span class="p">,</span>
+    <span class="p">)</span>
+
+  <span class="k">def</span><span class="w"> </span><span class="nf">_get_points_from_buffer</span><span class="p">(</span>
+    <span class="bp">self</span><span class="p">,</span>
+    <span class="n">points_buffer</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">count_buffer</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">cursor_buffer</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">env_idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+  <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">points_buffer</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">count_buffer</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+      <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="n">count</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">count_buffer</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span><span class="o">.</span><span class="n">item</span><span class="p">())</span>
+    <span class="k">if</span> <span class="n">count</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+      <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="n">points</span> <span class="o">=</span> <span class="n">points_buffer</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">cursor_buffer</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">count</span> <span class="o">==</span> <span class="n">points</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]:</span>
+      <span class="n">cursor</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">cursor_buffer</span><span class="p">[</span><span class="n">env_idx</span><span class="p">]</span><span class="o">.</span><span class="n">item</span><span class="p">())</span>
+      <span class="k">if</span> <span class="n">cursor</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">points</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">roll</span><span class="p">(</span><span class="n">points</span><span class="p">,</span> <span class="n">shifts</span><span class="o">=-</span><span class="n">cursor</span><span class="p">,</span> <span class="n">dims</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+      <span class="n">points</span> <span class="o">=</span> <span class="n">points</span><span class="p">[:</span><span class="n">count</span><span class="p">]</span>
+
+    <span class="n">render_count</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">count</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">viz</span><span class="o">.</span><span class="n">accumulated_render_points</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">render_count</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+      <span class="k">return</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">render_count</span> <span class="o">&lt;</span> <span class="n">count</span><span class="p">:</span>
+      <span class="n">idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span>
+        <span class="mi">0</span><span class="p">,</span>
+        <span class="n">count</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="n">render_count</span><span class="p">,</span>
+        <span class="n">device</span><span class="o">=</span><span class="n">points</span><span class="o">.</span><span class="n">device</span><span class="p">,</span>
+        <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span>
+      <span class="p">)</span><span class="o">.</span><span class="n">round</span><span class="p">()</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+      <span class="n">points</span> <span class="o">=</span> <span class="n">points</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">points</span>
 
   <span class="k">def</span><span class="w"> </span><span class="nf">_compute_alignment_rotation</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frame_mat</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute rotation matrix based on ray_alignment setting.&quot;&quot;&quot;</span>

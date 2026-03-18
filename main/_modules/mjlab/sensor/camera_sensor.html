@@ -568,7 +568,11 @@ document.write(`
 
     <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_is_wrapping_existing</span><span class="p">:</span>
       <span class="n">cam</span> <span class="o">=</span> <span class="n">scene_spec</span><span class="o">.</span><span class="n">camera</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_camera_name</span><span class="p">)</span>
-      <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">cam</span><span class="p">,</span> <span class="n">mujoco</span><span class="o">.</span><span class="n">MjsCamera</span><span class="p">)</span>
+      <span class="k">if</span> <span class="n">cam</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">available</span> <span class="o">=</span> <span class="p">[</span><span class="n">spec_cam</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">spec_cam</span> <span class="ow">in</span> <span class="n">scene_spec</span><span class="o">.</span><span class="n">cameras</span><span class="p">]</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+          <span class="sa">f</span><span class="s2">&quot;Camera &#39;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_camera_name</span><span class="si">}</span><span class="s2">&#39; not found in spec. Available: </span><span class="si">{</span><span class="n">available</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="p">)</span>
       <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">fovy</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">cam</span><span class="o">.</span><span class="n">fovy</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">fovy</span>
       <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">orthographic</span><span class="p">:</span>
